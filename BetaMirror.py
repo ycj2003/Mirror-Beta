@@ -276,6 +276,40 @@ with st.sidebar:
     2. 开始与认知镜子对话
     3. 如果需要中断AI的当前回应，可以刷新页面
     """)
+    
+    if st.button("🔄 创建新会话"):
+        # 1. 显示提示信息
+        st.info("正在清理当前会话并创建新对话...")
+        
+        # 2. 清除Firestore中的历史数据（关键步骤）
+        # 假设您有delete_firestore_session函数或类似机制
+        # delete_firestore_session(st.session_state.user_session_id) 
+        
+        # 3. 清除Streamlit的session_state中的聊天历史
+        if 'messages' in st.session_state:
+            # 保留系统消息，仅清除用户和助理的对话
+            st.session_state.messages = [st.session_state.messages[0]] if st.session_state.messages else []
+        
+        # 4. 生成一个新的会话ID并更新状态和URL
+        new_session_id = str(uuid4())
+        st.session_state.user_session_id = new_session_id
+        st.query_params["session_id"] = new_session_id  # 更新URL参数
+        
+        # 5. 清除浏览器本地存储中的旧会话ID（如果使用了的话）
+        clear_script = """
+        <script>
+        localStorage.removeItem('mirror_session_id');
+        </script>
+        """
+        components.html(clear_script, height=0, width=0)
+        
+        # 6. 强烈建议这里不再使用st.stop()，而是直接强制刷新页面
+        force_reload_script = """
+        <script>
+        window.location.href = window.location.origin + window.location.pathname;
+        </script>
+        """
+        components.html(force_reload_script, height=0, width=0)
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
