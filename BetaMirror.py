@@ -54,35 +54,74 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理（简化修复版） ----------------------------
-def get_or_create_session_id():
-    """获取或创建唯一的用户会话 ID"""
-    # 1. 如果已经在session_state中有有效ID，直接返回
-    if 'user_session_id' in st.session_state and st.session_state.user_session_id:
+# ---------------------------- 会话 ID 管理（彻底修复版） ----------------------------
+def initialize_session_management():
+    """初始化会话管理，处理localStorage和URL同步"""
+    
+    # 如果已经处理过会话ID，直接返回
+    if 'session_initialized' in st.session_state:
         return st.session_state.user_session_id
     
-    # 2. 尝试从URL参数获取
-    if 'session_id' in st.query_params:
-        session_id = st.query_params['session_id']
-        st.session_state.user_session_id = session_id
-        return session_id
+    # 检查URL参数中的session_id
+    url_session_id = st.query_params.get('session_id')
     
-    # 3. 如果都没有，直接创建新ID（不依赖JavaScript）
-    new_session_id = f"user_{str(uuid4())[:8]}_{int(time.time())}"
-    st.session_state.user_session_id = new_session_id
+    if url_session_id:
+        # URL中有session_id，使用它并同步到localStorage
+        st.session_state.user_session_id = url_session_id
+        st.session_state.session_initialized = True
+        
+        # 同步到localStorage
+        sync_script = f"""
+        <script>
+        localStorage.setItem('mirror_session_id', '{url_session_id}');
+        console.log('Session ID saved to localStorage:', '{url_session_id}');
+        </script>
+        """
+        components.html(sync_script, height=0)
+        return url_session_id
     
-    # 更新URL参数（不刷新页面）
-    st.query_params['session_id'] = new_session_id
-    
-    # 可选：同步到localStorage（不阻塞主流程）
-    sync_script = f"""
-    <script>
-    localStorage.setItem('mirror_session_id', '{new_session_id}');
-    </script>
-    """
-    components.html(sync_script, height=0)
-    
-    return new_session_id
+    else:
+        # URL中没有session_id，尝试从localStorage恢复
+        # 使用JavaScript检查localStorage并更新URL
+        restore_script = """
+        <script>
+        function restoreSession() {
+            var storedSessionId = localStorage.getItem('mirror_session_id');
+            console.log('Stored session ID:', storedSessionId);
+            
+            if (storedSessionId && storedSessionId !== 'null' && storedSessionId !== '') {
+                // 找到存储的会话ID，更新URL
+                var currentUrl = new URL(window.location);
+                currentUrl.searchParams.set('session_id', storedSessionId);
+                console.log('Redirecting to:', currentUrl.toString());
+                window.location.replace(currentUrl.toString());
+            } else {
+                // 没有存储的会话ID，创建新的
+                var newSessionId = 'user_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+                localStorage.setItem('mirror_session_id', newSessionId);
+                
+                var currentUrl = new URL(window.location);
+                currentUrl.searchParams.set('session_id', newSessionId);
+                console.log('Creating new session and redirecting to:', currentUrl.toString());
+                window.location.replace(currentUrl.toString());
+            }
+        }
+        
+        // 延迟执行确保页面完全加载
+        setTimeout(restoreSession, 100);
+        </script>
+        """
+        
+        components.html(restore_script, height=0)
+        
+        # 在JavaScript重定向期间，显示加载提示并暂停执行
+        st.info("正在恢复会话...")
+        time.sleep(0.5)  # 给JavaScript一点执行时间
+        st.stop()  # 停止执行，等待重定向
+
+def get_current_session_id():
+    """获取当前会话ID"""
+    return initialize_session_management()
 
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
@@ -156,7 +195,7 @@ if "secrets_error" not in st.session_state:
     st.session_state.secrets_error = None
 
 # **关键修复：统一的会话ID管理**
-current_session_id = get_or_create_session_id()
+current_session_id = get_current_session_id()
 
 # 初始化或加载对话历史
 if "messages" not in st.session_state:
@@ -251,42 +290,51 @@ with st.sidebar:
     
     # **修复新对话功能**
     if st.button("🔄 创建新会话"):
+        # 生成新的会话ID
+        new_session_id = f"user_{int(time.time())}_{str(uuid4())[:8]}"
+        
+        # 清除当前会话数据
         try:
             # 1. 删除Firebase中的当前会话数据
             if st.session_state.db_initialized and db:
-                try:
-                    doc_ref = db.collection("conversations").document(current_session_id)
-                    doc_ref.delete()
-                except Exception as e:
-                    st.warning(f"清除远程存档失败: {e}")
-            
-            # 2. 生成新的会话ID
-            new_session_id = f"user_{str(uuid4())[:8]}_{int(time.time())}"
-            
-            # 3. 清除当前页面状态
-            for key in list(st.session_state.keys()):
-                if key not in ['api_key_configured', 'client', 'db_initialized']:
-                    del st.session_state[key]
-            
-            # 4. 使用JavaScript清除localStorage并跳转到新会话
-            new_session_script = f"""
-            <script>
-            // 清除旧的会话ID
-            localStorage.removeItem('mirror_session_id');
-            // 设置新的会话ID
-            localStorage.setItem('mirror_session_id', '{new_session_id}');
-            // 跳转到新会话URL
-            var url = new URL(window.location);
-            url.searchParams.set('session_id', '{new_session_id}');
-            window.location.href = url.toString();
-            </script>
-            """
-            components.html(new_session_script, height=0)
-            st.success("正在创建新会话...")
-            st.stop()
-            
+                doc_ref = db.collection("conversations").document(current_session_id)
+                doc_ref.delete()
         except Exception as e:
-            st.error(f"创建新会话失败: {e}")
+            st.warning(f"清除远程存档失败: {e}")
+        
+        # 2. 清除Streamlit session state中的消息
+        keys_to_clear = ['messages', 'user_session_id', 'session_initialized']
+        for key in keys_to_clear:
+            if key in st.session_state:
+                del st.session_state[key]
+        
+        # 3. 使用JavaScript更新localStorage和跳转
+        new_session_script = f"""
+        <script>
+        console.log('Creating new session: {new_session_id}');
+        
+        // 更新localStorage
+        localStorage.setItem('mirror_session_id', '{new_session_id}');
+        
+        // 跳转到新会话（使用replace避免返回按钮问题）
+        var newUrl = new URL(window.location);
+        newUrl.searchParams.set('session_id', '{new_session_id}');
+        console.log('Redirecting to:', newUrl.toString());
+        
+        // 立即跳转
+        window.location.replace(newUrl.toString());
+        </script>
+        """
+        
+        # 显示提示信息
+        st.success("正在创建新会话...")
+        
+        # 执行JavaScript
+        components.html(new_session_script, height=0)
+        
+        # 短暂等待然后停止执行，让JavaScript完成跳转
+        time.sleep(0.3)
+        st.stop()
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
