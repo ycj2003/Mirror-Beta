@@ -54,9 +54,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理（添加localStorage恢复） ----------------------------
+# ---------------------------- 会话 ID 管理（直接重定向版） ----------------------------
 def get_current_session_id():
-    """获取当前会话ID - 支持localStorage恢复"""
+    """获取当前会话ID - 直接重定向版"""
     
     # 1. 如果session_state中已有ID，直接使用
     if 'user_session_id' in st.session_state and st.session_state.user_session_id:
@@ -77,41 +77,44 @@ def get_current_session_id():
         
         return session_id
     
-    # 3. URL中没有session_id，尝试从localStorage恢复
-    # 使用一个特殊的标记来避免无限循环
-    if not st.session_state.get('localStorage_check_done', False):
-        st.session_state.localStorage_check_done = True
-        
-        # 尝试从localStorage获取并更新URL
-        restore_script = """
+    # 3. URL中没有session_id，需要检查localStorage
+    # 添加一个查询参数标记来避免无限重定向
+    if st.query_params.get('check_storage') != 'done':
+        # 第一次访问没有session_id的URL，尝试从localStorage恢复
+        restore_and_redirect_script = """
         <script>
-        var storedSessionId = localStorage.getItem('mirror_session_id');
-        if (storedSessionId && storedSessionId !== 'null' && storedSessionId !== '') {
-            // 找到存储的会话ID，更新URL参数
-            var url = new URL(window.location);
-            url.searchParams.set('session_id', storedSessionId);
-            // 使用replace避免在历史记录中留下无session_id的URL
-            window.history.replaceState(null, null, url.toString());
+        (function() {
+            var storedSessionId = localStorage.getItem('mirror_session_id');
+            console.log('检查localStorage中的会话ID:', storedSessionId);
             
-            // 通知Streamlit重新运行
-            window.parent.postMessage({
-                type: 'streamlit:setQueryParams',
-                queryParams: {'session_id': storedSessionId}
-            }, '*');
-            
-            // 强制刷新页面以应用新的URL参数
-            setTimeout(() => {
-                window.location.reload();
-            }, 100);
-        }
+            if (storedSessionId && storedSessionId !== 'null' && storedSessionId.trim() !== '') {
+                // 找到了存储的会话ID，立即重定向
+                console.log('找到存储的会话ID，准备重定向:', storedSessionId);
+                var url = new URL(window.location);
+                url.searchParams.set('session_id', storedSessionId);
+                url.searchParams.delete('check_storage'); // 清除检查标记
+                console.log('重定向到:', url.toString());
+                window.location.replace(url.toString());
+                return;
+            } else {
+                // 没找到存储的会话ID，标记检查完成
+                console.log('localStorage中没有会话ID，标记检查完成');
+                var url = new URL(window.location);
+                url.searchParams.set('check_storage', 'done');
+                window.location.replace(url.toString());
+                return;
+            }
+        })();
         </script>
         """
-        components.html(restore_script, height=0)
         
-        # 给JavaScript一点时间执行，但不会无限等待
-        time.sleep(0.2)
+        components.html(restore_and_redirect_script, height=0)
+        st.info("正在检查会话状态...")
+        st.stop()  # 停止执行，等待JavaScript重定向
     
-    # 4. 如果localStorage也没有，或者恢复失败，创建新ID
+    # 4. 已经检查过localStorage但没找到会话ID，创建新的
+    st.query_params.pop('check_storage', None)  # 清除检查标记
+    
     new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
     st.session_state.user_session_id = new_session_id
     
@@ -122,6 +125,7 @@ def get_current_session_id():
     sync_script = f"""
     <script>
     localStorage.setItem('mirror_session_id', '{new_session_id}');
+    console.log('创建新会话ID并存储:', '{new_session_id}');
     </script>
     """
     components.html(sync_script, height=0)
