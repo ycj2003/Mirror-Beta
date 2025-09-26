@@ -54,9 +54,45 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理（纯服务端版本） ----------------------------
+# ---------------------------- 用户身份管理 ----------------------------
+def get_user_id():
+    """获取唯一的用户身份标识"""
+    # 使用浏览器fingerprint作为用户标识
+    if 'browser_user_id' not in st.session_state:
+        # 生成基于时间和随机数的用户ID
+        st.session_state.browser_user_id = f"browser_{int(time.time())}_{str(uuid4())[:12]}"
+        
+        # 尝试从localStorage获取已存储的用户ID
+        get_user_id_script = f"""
+        <script>
+        var storedUserId = localStorage.getItem('mirror_user_id');
+        if (storedUserId && storedUserId !== 'null') {{
+            // 如果找到已存储的用户ID，通过自定义事件发送给Streamlit
+            window.dispatchEvent(new CustomEvent('userIdFound', {{
+                detail: {{ userId: storedUserId }}
+            }});
+            
+            // 同时尝试通过postMessage发送（兼容性）
+            window.parent.postMessage({{
+                type: 'USER_ID_FOUND',
+                userId: storedUserId
+            }}, '*');
+        }} else {{
+            // 没找到，存储新生成的用户ID
+            localStorage.setItem('mirror_user_id', '{st.session_state.browser_user_id}');
+        }}
+        </script>
+        """
+        components.html(get_user_id_script, height=0)
+    
+    return st.session_state.browser_user_id
+
+# ---------------------------- 会话 ID 管理（添加用户隔离） ----------------------------
 def get_current_session_id():
-    """获取当前会话ID - 不依赖JavaScript的版本"""
+    """获取当前会话ID - 绑定到特定用户"""
+    
+    # 首先确保有用户ID
+    user_id = get_user_id()
     
     # 1. 如果session_state中已有ID，直接使用
     if 'user_session_id' in st.session_state and st.session_state.user_session_id:
@@ -65,30 +101,32 @@ def get_current_session_id():
     # 2. 尝试从URL参数获取
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
-        st.session_state.user_session_id = session_id
-        
-        # 可选：后台同步到localStorage（完全非阻塞）
-        sync_script = f"""
-        <script>
-        try {{
-            localStorage.setItem('mirror_session_id', '{session_id}');
-        }} catch(e) {{
-            console.log('localStorage不可用:', e);
-        }}
-        </script>
-        """
-        components.html(sync_script, height=0)
-        
-        return session_id
+        # 验证这个session_id是否属于当前用户
+        if session_id.startswith(user_id[:8]):  # 简单验证
+            st.session_state.user_session_id = session_id
+            
+            # 后台同步到localStorage
+            sync_script = f"""
+            <script>
+            try {{
+                localStorage.setItem('mirror_session_id', '{session_id}');
+            }} catch(e) {{
+                console.log('localStorage不可用:', e);
+            }}
+            </script>
+            """
+            components.html(sync_script, height=0)
+            
+            return session_id
     
-    # 3. 都没有则创建新ID（不等待任何东西）
-    new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
+    # 3. 创建新的用户专属会话ID
+    new_session_id = f"{user_id}_{int(time.time())}_{str(uuid4())[:6]}"
     st.session_state.user_session_id = new_session_id
     
     # 更新URL参数
     st.query_params['session_id'] = new_session_id
     
-    # 可选：同步到localStorage（完全非阻塞）
+    # 同步到localStorage
     sync_script = f"""
     <script>
     try {{
@@ -174,6 +212,7 @@ if "secrets_error" not in st.session_state:
     st.session_state.secrets_error = None
 
 # **关键修复：统一的会话ID管理**
+user_id = get_user_id()
 current_session_id = get_current_session_id()
 
 # 初始化或加载对话历史
@@ -251,16 +290,24 @@ with st.sidebar:
         """
         components.html(get_last_session_script, height=0)
         
-        # 检查Firebase中是否有其他会话
+        # 检查Firebase中是否有其他会话（仅限当前用户）
         try:
-            # 查询最近的几个会话
-            docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(5).stream()
+            # 只查询属于当前用户的会话记录
+            user_prefix = user_id[:12]  # 使用用户ID前缀进行过滤
+            
+            # 查询所有会话，然后在Python中过滤（因为Firestore的前缀查询限制）
+            docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(20).stream()
             recent_sessions = []
             
             for doc in docs:
                 doc_data = doc.to_dict()
                 session_id = doc.id
-                if session_id != current_session_id and doc_data.get('history'):
+                
+                # 严格检查：只显示属于当前用户的会话
+                if (session_id.startswith(user_prefix) and 
+                    session_id != current_session_id and 
+                    doc_data.get('history')):
+                    
                     # 获取最后一条消息的时间和内容预览
                     last_updated = doc_data.get('last_updated')
                     history = doc_data.get('history', [])
@@ -274,9 +321,9 @@ with st.sidebar:
                         })
             
             if recent_sessions:
-                st.write("🔄 **发现最近的对话记录**")
+                st.write("🔄 **您的历史对话记录**")
                 
-                # 显示可恢复的会话列表
+                # 显示当前用户的会话列表
                 for i, session in enumerate(recent_sessions[:3]):  # 只显示最近3个
                     time_str = "未知时间"
                     if session['time']:
@@ -285,35 +332,39 @@ with st.sidebar:
                         except:
                             time_str = "最近"
                     
-                    session_preview = f"会话 {session['id'][:8]}... ({session['message_count']}条消息)"
+                    session_preview = f"会话 {session['id'][-8:]}... ({session['message_count']}条消息)"
                     if session['preview']:
                         session_preview += f"\n最后消息: {session['preview']}"
                     
                     if st.button(f"📂 恢复会话 ({time_str})", key=f"restore_{i}", help=session_preview):
-                        # 恢复选中的会话
-                        st.session_state.user_session_id = session['id']
-                        st.query_params['session_id'] = session['id']
-                        
-                        # 清除当前消息
-                        if 'messages' in st.session_state:
-                            del st.session_state['messages']
-                        
-                        # 更新localStorage
-                        update_storage_script = f"""
-                        <script>
-                        localStorage.setItem('mirror_session_id', '{session['id']}');
-                        window.location.reload();
-                        </script>
-                        """
-                        components.html(update_storage_script, height=0)
-                        
-                        st.success(f"正在恢复会话 {session['id'][:8]}...")
-                        time.sleep(0.5)
-                        st.rerun()
+                        # 再次验证会话属于当前用户
+                        if session['id'].startswith(user_prefix):
+                            # 恢复选中的会话
+                            st.session_state.user_session_id = session['id']
+                            st.query_params['session_id'] = session['id']
+                            
+                            # 清除当前消息
+                            if 'messages' in st.session_state:
+                                del st.session_state['messages']
+                            
+                            # 更新localStorage
+                            update_storage_script = f"""
+                            <script>
+                            localStorage.setItem('mirror_session_id', '{session['id']}');
+                            window.location.reload();
+                            </script>
+                            """
+                            components.html(update_storage_script, height=0)
+                            
+                            st.success(f"正在恢复会话 {session['id'][-8:]}...")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error("安全验证失败：无法访问该会话")
                 
-                st.caption("💡 提示：关闭网页后，下次访问时可以通过这里恢复之前的对话")
+                st.caption("💡 提示：只显示您自己的对话记录")
             else:
-                st.caption("暂无可恢复的对话记录")
+                st.caption("暂无您的历史对话记录")
                 
         except Exception as e:
             st.caption(f"检查历史会话时出错: {e}")
@@ -356,8 +407,8 @@ with st.sidebar:
     
     # **简化新对话功能**
     if st.button("🔄 创建新会话"):
-        # 生成新的会话ID
-        new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
+        # 生成新的用户专属会话ID
+        new_session_id = f"{user_id}_{int(time.time())}_{str(uuid4())[:6]}"
         
         # 清除Firebase中的旧数据（静默处理）
         if st.session_state.db_initialized and db:
