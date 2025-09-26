@@ -54,9 +54,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理（最简版） ----------------------------
+# ---------------------------- 会话 ID 管理（添加localStorage恢复） ----------------------------
 def get_current_session_id():
-    """获取当前会话ID - 简化版，不依赖JavaScript"""
+    """获取当前会话ID - 支持localStorage恢复"""
     
     # 1. 如果session_state中已有ID，直接使用
     if 'user_session_id' in st.session_state and st.session_state.user_session_id:
@@ -77,7 +77,41 @@ def get_current_session_id():
         
         return session_id
     
-    # 3. 都没有则创建新ID
+    # 3. URL中没有session_id，尝试从localStorage恢复
+    # 使用一个特殊的标记来避免无限循环
+    if not st.session_state.get('localStorage_check_done', False):
+        st.session_state.localStorage_check_done = True
+        
+        # 尝试从localStorage获取并更新URL
+        restore_script = """
+        <script>
+        var storedSessionId = localStorage.getItem('mirror_session_id');
+        if (storedSessionId && storedSessionId !== 'null' && storedSessionId !== '') {
+            // 找到存储的会话ID，更新URL参数
+            var url = new URL(window.location);
+            url.searchParams.set('session_id', storedSessionId);
+            // 使用replace避免在历史记录中留下无session_id的URL
+            window.history.replaceState(null, null, url.toString());
+            
+            // 通知Streamlit重新运行
+            window.parent.postMessage({
+                type: 'streamlit:setQueryParams',
+                queryParams: {'session_id': storedSessionId}
+            }, '*');
+            
+            // 强制刷新页面以应用新的URL参数
+            setTimeout(() => {
+                window.location.reload();
+            }, 100);
+        }
+        </script>
+        """
+        components.html(restore_script, height=0)
+        
+        # 给JavaScript一点时间执行，但不会无限等待
+        time.sleep(0.2)
+    
+    # 4. 如果localStorage也没有，或者恢复失败，创建新ID
     new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
     st.session_state.user_session_id = new_session_id
     
