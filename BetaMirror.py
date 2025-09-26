@@ -91,16 +91,7 @@ def get_session_id():
         if user_id[:8] in st.session_state.current_session_id:
             return st.session_state.current_session_id
     
-    # 3. 如果是新用户且没有URL参数，尝试加载最近的会话
-    if 'session_id' not in st.query_params:
-        latest_session_id = get_latest_user_session()
-        if latest_session_id and user_id[:8] in latest_session_id:
-            # 找到最近的会话，设置为当前会话
-            st.session_state.current_session_id = latest_session_id
-            st.query_params['session_id'] = latest_session_id
-            return latest_session_id
-    
-    # 4. 创建新会话ID
+    # 3. 创建新会话ID
     timestamp = int(time.time())
     random_part = str(uuid4())[:6]
     new_session_id = f"{user_id}_{timestamp}_{random_part}"
@@ -157,7 +148,7 @@ def load_conversation(session_id):
     except Exception as e:
         return None, f"加载失败: {str(e)}"
 
-def get_user_sessions(include_current=False):
+def get_user_sessions():
     """获取当前用户的会话列表"""
     if not st.session_state.get('db_initialized') or not db:
         return []
@@ -175,11 +166,10 @@ def get_user_sessions(include_current=False):
             session_id = doc.id
             stored_user_id = doc_data.get('user_id', '')
             
-            # 检查是否属于当前用户
-            if (user_id[:8] in stored_user_id and doc_data.get('messages')):
-                # 如果不包含当前会话，则跳过当前会话
-                if not include_current and session_id == current_session:
-                    continue
+            # 检查是否属于当前用户，且不是当前会话
+            if (user_id[:8] in stored_user_id and 
+                session_id != current_session and 
+                doc_data.get('messages')):
                 
                 messages = doc_data.get('messages', [])
                 last_message = ""
@@ -199,17 +189,6 @@ def get_user_sessions(include_current=False):
     except Exception as e:
         st.sidebar.error(f"获取会话列表失败: {e}")
         return []
-
-def get_latest_user_session():
-    """获取用户最近的会话ID"""
-    try:
-        user_sessions = get_user_sessions(include_current=True)
-        if user_sessions:
-            # 返回最近的会话ID
-            return user_sessions[0]['id']
-        return None
-    except:
-        return None
 
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
@@ -288,13 +267,7 @@ if "messages" not in st.session_state:
         st.session_state.messages = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ] + loaded_messages
-        
-        # 检查是否是自动加载的最近会话
-        latest_session = get_latest_user_session()
-        if current_session_id == latest_session and len(loaded_messages) > 1:
-            st.sidebar.success(f"✅ 已自动恢复最近对话 (共{len(loaded_messages)}条消息)")
-        else:
-            st.sidebar.success(f"✅ {load_message} (共{len(loaded_messages)}条消息)")
+        st.sidebar.success(f"✅ {load_message} (共{len(loaded_messages)}条消息)")
     else:
         # 创建新对话
         st.session_state.messages = [
@@ -357,9 +330,9 @@ with st.sidebar:
     st.subheader("📁 会话管理")
     
     # 显示历史会话
-    user_sessions = get_user_sessions(include_current=False)  # 不包含当前会话
+    user_sessions = get_user_sessions()
     if user_sessions:
-        st.write("**其他历史对话:**")
+        st.write("**历史对话:**")
         for i, session in enumerate(user_sessions[:5]):
             time_str = "未知"
             if session['time']:
@@ -385,7 +358,7 @@ with st.sidebar:
             if session['preview']:
                 st.caption(f"💭 {session['preview']}")
     else:
-        st.caption("暂无其他历史对话")
+        st.caption("暂无历史对话")
     
     # 新建会话按钮
     if st.button("🆕 新建会话"):
