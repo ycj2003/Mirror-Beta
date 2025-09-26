@@ -54,51 +54,35 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理（修复版） ----------------------------
+# ---------------------------- 会话 ID 管理（简化修复版） ----------------------------
 def get_or_create_session_id():
     """获取或创建唯一的用户会话 ID"""
-    # 如果已经在session_state中有ID，直接返回
-    if 'user_session_id' in st.session_state and st.session_state.user_session_id != "pending_js_session_id":
+    # 1. 如果已经在session_state中有有效ID，直接返回
+    if 'user_session_id' in st.session_state and st.session_state.user_session_id:
         return st.session_state.user_session_id
     
-    # 1. 首先尝试从URL参数获取
+    # 2. 尝试从URL参数获取
     if 'session_id' in st.query_params:
         session_id = st.query_params['session_id']
         st.session_state.user_session_id = session_id
-        # 同步到localStorage
-        sync_to_localstorage_script = f"""
-        <script>
-        localStorage.setItem('mirror_session_id', '{session_id}');
-        </script>
-        """
-        components.html(sync_to_localstorage_script, height=0)
         return session_id
     
-    # 2. 如果URL没有，尝试从localStorage获取并同步到URL
-    get_from_localstorage_script = """
+    # 3. 如果都没有，直接创建新ID（不依赖JavaScript）
+    new_session_id = f"user_{str(uuid4())[:8]}_{int(time.time())}"
+    st.session_state.user_session_id = new_session_id
+    
+    # 更新URL参数（不刷新页面）
+    st.query_params['session_id'] = new_session_id
+    
+    # 可选：同步到localStorage（不阻塞主流程）
+    sync_script = f"""
     <script>
-    var sessionId = localStorage.getItem('mirror_session_id');
-    if (sessionId && sessionId !== 'null') {
-        // 更新URL参数并刷新页面
-        var url = new URL(window.location);
-        url.searchParams.set('session_id', sessionId);
-        window.location.href = url.toString();
-    } else {
-        // 3. 都没有的话，创建新ID
-        var newSessionId = 'user_' + Math.random().toString(36).substring(2) + '_' + Date.now().toString(36);
-        localStorage.setItem('mirror_session_id', newSessionId);
-        var url = new URL(window.location);
-        url.searchParams.set('session_id', newSessionId);
-        window.location.href = url.toString();
-    }
+    localStorage.setItem('mirror_session_id', '{new_session_id}');
     </script>
     """
-    components.html(get_from_localstorage_script, height=0)
+    components.html(sync_script, height=0)
     
-    # 在JavaScript执行期间返回临时ID
-    temp_id = f"temp_user_{str(uuid4())[:8]}"
-    st.session_state.user_session_id = temp_id
-    return temp_id
+    return new_session_id
 
 # ---------------------------- 自定义CSS ----------------------------
 st.markdown("""
@@ -173,10 +157,6 @@ if "secrets_error" not in st.session_state:
 
 # **关键修复：统一的会话ID管理**
 current_session_id = get_or_create_session_id()
-if current_session_id.startswith("temp_user_"):
-    # 如果还是临时ID，说明JavaScript还在执行，暂停并等待页面刷新
-    st.info("正在初始化会话...")
-    st.stop()
 
 # 初始化或加载对话历史
 if "messages" not in st.session_state:
