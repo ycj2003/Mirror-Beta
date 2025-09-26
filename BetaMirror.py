@@ -54,9 +54,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ---------------------------- 会话 ID 管理（直接重定向版） ----------------------------
+# ---------------------------- 会话 ID 管理（纯服务端版本） ----------------------------
 def get_current_session_id():
-    """获取当前会话ID - 直接重定向版"""
+    """获取当前会话ID - 不依赖JavaScript的版本"""
     
     # 1. 如果session_state中已有ID，直接使用
     if 'user_session_id' in st.session_state and st.session_state.user_session_id:
@@ -67,65 +67,35 @@ def get_current_session_id():
         session_id = st.query_params['session_id']
         st.session_state.user_session_id = session_id
         
-        # 后台同步到localStorage（非阻塞）
+        # 可选：后台同步到localStorage（完全非阻塞）
         sync_script = f"""
         <script>
-        localStorage.setItem('mirror_session_id', '{session_id}');
+        try {{
+            localStorage.setItem('mirror_session_id', '{session_id}');
+        }} catch(e) {{
+            console.log('localStorage不可用:', e);
+        }}
         </script>
         """
         components.html(sync_script, height=0)
         
         return session_id
     
-    # 3. URL中没有session_id，需要检查localStorage
-    # 添加一个查询参数标记来避免无限重定向
-    if st.query_params.get('check_storage') != 'done':
-        # 第一次访问没有session_id的URL，尝试从localStorage恢复
-        restore_and_redirect_script = """
-        <script>
-        (function() {
-            var storedSessionId = localStorage.getItem('mirror_session_id');
-            console.log('检查localStorage中的会话ID:', storedSessionId);
-            
-            if (storedSessionId && storedSessionId !== 'null' && storedSessionId.trim() !== '') {
-                // 找到了存储的会话ID，立即重定向
-                console.log('找到存储的会话ID，准备重定向:', storedSessionId);
-                var url = new URL(window.location);
-                url.searchParams.set('session_id', storedSessionId);
-                url.searchParams.delete('check_storage'); // 清除检查标记
-                console.log('重定向到:', url.toString());
-                window.location.replace(url.toString());
-                return;
-            } else {
-                // 没找到存储的会话ID，标记检查完成
-                console.log('localStorage中没有会话ID，标记检查完成');
-                var url = new URL(window.location);
-                url.searchParams.set('check_storage', 'done');
-                window.location.replace(url.toString());
-                return;
-            }
-        })();
-        </script>
-        """
-        
-        components.html(restore_and_redirect_script, height=0)
-        st.info("正在检查会话状态...")
-        st.stop()  # 停止执行，等待JavaScript重定向
-    
-    # 4. 已经检查过localStorage但没找到会话ID，创建新的
-    st.query_params.pop('check_storage', None)  # 清除检查标记
-    
+    # 3. 都没有则创建新ID（不等待任何东西）
     new_session_id = f"user_{int(time.time())}_{str(uuid4())[:6]}"
     st.session_state.user_session_id = new_session_id
     
     # 更新URL参数
     st.query_params['session_id'] = new_session_id
     
-    # 同步到localStorage
+    # 可选：同步到localStorage（完全非阻塞）
     sync_script = f"""
     <script>
-    localStorage.setItem('mirror_session_id', '{new_session_id}');
-    console.log('创建新会话ID并存储:', '{new_session_id}');
+    try {{
+        localStorage.setItem('mirror_session_id', '{new_session_id}');
+    }} catch(e) {{
+        console.log('localStorage不可用:', e);
+    }}
     </script>
     """
     components.html(sync_script, height=0)
@@ -261,7 +231,94 @@ with st.sidebar:
     # 显示当前会话ID（调试用）
     st.caption(f"当前会话: {current_session_id[:12]}...")
     
-    # 显示 Secrets 错误信息（如果有）
+    # **会话恢复功能**
+    st.subheader("📁 会话管理")
+    
+    # 检查是否有可恢复的会话
+    if st.session_state.get('db_initialized') and db:
+        # 尝试从localStorage获取上一个会话ID
+        get_last_session_script = """
+        <script>
+        var lastSessionId = localStorage.getItem('mirror_session_id');
+        if (lastSessionId && lastSessionId !== window.location.search.split('session_id=')[1]) {
+            // 如果localStorage中的ID与当前URL中的不同，说明可能需要恢复
+            window.parent.postMessage({
+                type: 'LAST_SESSION_ID',
+                sessionId: lastSessionId
+            }, '*');
+        }
+        </script>
+        """
+        components.html(get_last_session_script, height=0)
+        
+        # 检查Firebase中是否有其他会话
+        try:
+            # 查询最近的几个会话
+            docs = db.collection("conversations").order_by('last_updated', direction=firestore.Query.DESCENDING).limit(5).stream()
+            recent_sessions = []
+            
+            for doc in docs:
+                doc_data = doc.to_dict()
+                session_id = doc.id
+                if session_id != current_session_id and doc_data.get('history'):
+                    # 获取最后一条消息的时间和内容预览
+                    last_updated = doc_data.get('last_updated')
+                    history = doc_data.get('history', [])
+                    if history:
+                        last_message = history[-1].get('content', '')[:50] + '...' if len(history[-1].get('content', '')) > 50 else history[-1].get('content', '')
+                        recent_sessions.append({
+                            'id': session_id,
+                            'preview': last_message,
+                            'time': last_updated,
+                            'message_count': len(history)
+                        })
+            
+            if recent_sessions:
+                st.write("🔄 **发现最近的对话记录**")
+                
+                # 显示可恢复的会话列表
+                for i, session in enumerate(recent_sessions[:3]):  # 只显示最近3个
+                    time_str = "未知时间"
+                    if session['time']:
+                        try:
+                            time_str = session['time'].strftime("%m-%d %H:%M")
+                        except:
+                            time_str = "最近"
+                    
+                    session_preview = f"会话 {session['id'][:8]}... ({session['message_count']}条消息)"
+                    if session['preview']:
+                        session_preview += f"\n最后消息: {session['preview']}"
+                    
+                    if st.button(f"📂 恢复会话 ({time_str})", key=f"restore_{i}", help=session_preview):
+                        # 恢复选中的会话
+                        st.session_state.user_session_id = session['id']
+                        st.query_params['session_id'] = session['id']
+                        
+                        # 清除当前消息
+                        if 'messages' in st.session_state:
+                            del st.session_state['messages']
+                        
+                        # 更新localStorage
+                        update_storage_script = f"""
+                        <script>
+                        localStorage.setItem('mirror_session_id', '{session['id']}');
+                        window.location.reload();
+                        </script>
+                        """
+                        components.html(update_storage_script, height=0)
+                        
+                        st.success(f"正在恢复会话 {session['id'][:8]}...")
+                        time.sleep(0.5)
+                        st.rerun()
+                
+                st.caption("💡 提示：关闭网页后，下次访问时可以通过这里恢复之前的对话")
+            else:
+                st.caption("暂无可恢复的对话记录")
+                
+        except Exception as e:
+            st.caption(f"检查历史会话时出错: {e}")
+    
+    st.divider()
     if hasattr(st.session_state, 'secrets_error') and st.session_state.secrets_error:
         st.error(f"预配置API密钥错误: {st.session_state.secrets_error}")
     
