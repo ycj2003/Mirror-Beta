@@ -8,6 +8,7 @@ from firebase_admin import credentials, firestore
 import json
 from uuid import uuid4
 import hashlib
+import streamlit.components.v1 as components
 
 # 初始化 Firebase（只会运行一次）
 if not firebase_admin._apps:
@@ -41,18 +42,6 @@ if st.session_state.get('db_initialized'):
     db = firestore.client()
 else:
     db = None
-
-# ---------------------------- 页面配置 ----------------------------
-st.set_page_config(
-    page_title="镜子",
-    page_icon="🪞",
-    layout="centered",
-    initial_sidebar_state="collapsed"
-)
-
-# 在页面最开始注入自动重定向脚本
-import streamlit.components.v1 as components
-components.html(inject_auto_redirect_script(), height=0)
 
 # ---------------------------- 用户身份管理（自动持久化方案） ----------------------------
 def inject_auto_redirect_script():
@@ -96,6 +85,17 @@ def inject_auto_redirect_script():
     </script>
     """
     return redirect_script
+
+# ---------------------------- 页面配置 ----------------------------
+st.set_page_config(
+    page_title="镜子",
+    page_icon="🪞",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
+
+# 在页面最开始注入自动重定向脚本
+components.html(inject_auto_redirect_script(), height=0)
 
 def get_user_id():
     """
