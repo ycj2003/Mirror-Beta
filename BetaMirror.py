@@ -8,7 +8,6 @@ from firebase_admin import credentials, firestore
 import json
 from uuid import uuid4
 import hashlib
-import streamlit.components.v1 as components
 
 # 初始化 Firebase（只会运行一次）
 if not firebase_admin._apps:
@@ -43,49 +42,6 @@ if st.session_state.get('db_initialized'):
 else:
     db = None
 
-# ---------------------------- 用户身份管理（自动持久化方案） ----------------------------
-def inject_auto_redirect_script():
-    """注入自动重定向脚本 - 保存和恢复URL参数"""
-    redirect_script = """
-    <script>
-    (function() {
-        const currentUrl = new URL(window.location.href);
-        const urlParams = currentUrl.searchParams;
-        
-        // 获取当前URL中的参数
-        const currentUid = urlParams.get('uid');
-        const currentSid = urlParams.get('sid');
-        
-        // 从localStorage获取保存的参数
-        const savedUid = localStorage.getItem('mirror_uid');
-        const savedSid = localStorage.getItem('mirror_sid');
-        
-        // 情况1: URL有uid，保存到localStorage
-        if (currentUid) {
-            if (currentUid !== savedUid) {
-                localStorage.setItem('mirror_uid', currentUid);
-            }
-            if (currentSid && currentSid !== savedSid) {
-                localStorage.setItem('mirror_sid', currentSid);
-            }
-        }
-        // 情况2: URL没有uid，但localStorage有 -> 重定向到完整URL
-        else if (savedUid) {
-            urlParams.set('uid', savedUid);
-            if (savedSid) {
-                urlParams.set('sid', savedSid);
-            }
-            currentUrl.search = urlParams.toString();
-            window.location.href = currentUrl.href;
-            return; // 停止执行，等待重定向
-        }
-        
-        // 情况3: 都没有 -> 等待Streamlit生成新ID
-    })();
-    </script>
-    """
-    return redirect_script
-
 # ---------------------------- 页面配置 ----------------------------
 st.set_page_config(
     page_title="镜子",
@@ -94,30 +50,29 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# 在页面最开始注入自动重定向脚本
-components.html(inject_auto_redirect_script(), height=0)
-
+# ---------------------------- 用户身份管理（改用URL持久化方案） ----------------------------
 def get_user_id():
     """
-    获取用户ID - 自动持久化方案
-    结合URL参数和localStorage，用户无需手动操作
+    获取用户ID - 改用URL作为唯一真实来源
+    用户首次访问时会被分配一个ID，并要求他们收藏/保存这个URL
     """
-    # 1. 从URL参数获取（最高优先级）
+    # 从URL参数获取
     if 'uid' in st.query_params:
         user_id = st.query_params['uid']
-        if user_id and len(user_id) > 10:
+        if user_id and len(user_id) > 10:  # 基本验证
             if 'user_id' not in st.session_state or st.session_state.user_id != user_id:
                 st.session_state.user_id = user_id
             return user_id
     
-    # 2. 从session_state获取
+    # 从session_state获取（刷新时用）
     if 'user_id' in st.session_state:
         user_id = st.session_state.user_id
+        # 确保URL也有
         if 'uid' not in st.query_params:
             st.query_params['uid'] = user_id
         return user_id
     
-    # 3. 生成新用户ID
+    # 生成新用户ID
     timestamp = int(time.time())
     random_part = str(uuid4()).replace('-', '')[:12]
     new_user_id = f"{timestamp}{random_part}"
@@ -351,9 +306,9 @@ if 'uid' in st.query_params and 'shown_url_notice' not in st.session_state:
     with st.sidebar:
         st.markdown("""
         <div class="url-notice">
-        <b>📌 提示</b><br>
-        您的对话已自动保存，下次可以直接访问本页面继续对话。<br>
-        建议将本页面<b>加入书签</b>以便快速访问。
+        <b>📌 重要提示</b><br>
+        为了能恢复您的对话记录，请将当前网址<b>加入书签</b>或<b>保存链接</b>。<br>
+        您的对话已自动绑定到此链接。
         </div>
         """, unsafe_allow_html=True)
 
@@ -473,7 +428,7 @@ with st.sidebar:
     
     st.divider()
     st.caption("💡 对话自动保存")
-    st.caption("🔄 退出重进自动恢复")
+    st.caption("🔖 保存网址以恢复对话")
 
 # ---------------------------- 主界面 ----------------------------
 st.markdown('<h1 class="main-title">🪞 镜子</h1>', unsafe_allow_html=True)
